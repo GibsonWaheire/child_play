@@ -5,10 +5,16 @@ import { useBeatQueue } from '../hooks/useBeatQueue';
 import { spawnBubble } from '../components/FloatBubble';
 import { magicWords } from '../data/magicWords';
 import GuidePanel from '../components/GuidePanel';
+import AdBreak from '../components/AdBreak';
 import StarField from '../components/StarField';
 
-const INACTIVITY_MS = 7000;
+const INACTIVITY_MS   = 8000;   // idle → show guide
+const AD_INTERVAL_MS  = 3 * 60 * 1000;  // 3 min between ads
+const AD_KEY_TRIGGER  = 40;     // OR every 40 keys (whichever comes first)
 const ALLOWED = /^[a-zA-Z0-9 ]$/;
+
+// Milestone key counts that trigger the guide panel proactively
+const MILESTONES = new Set([10, 25, 50, 100, 200]);
 
 function spawnFireworks() {
   for (let i = 0; i < 22; i++) {
@@ -33,20 +39,35 @@ export default function ChildPlay() {
   const { setMode, statsRef } = useApp();
   const { playNote, playFireworks, playCelebration } = useAudio();
 
-  const typedRef       = useRef('');
-  const inactivityRef  = useRef(null);
-  const hasStarted     = useRef(false);
+  const typedRef        = useRef('');
+  const inactivityRef   = useRef(null);
+  const hasStarted      = useRef(false);
+  const lastAdTime      = useRef(null);   // timestamp of last ad break
+  const keysSinceAd     = useRef(0);      // keys pressed since last ad
 
-  const [stars,        setStars]       = useState(0);
-  const [showHowTo,    setShowHowTo]   = useState(true);
-  const [showGuide,    setShowGuide]   = useState(false);
-  const [celebration,  setCelebration] = useState(null); // { word }
-  const [promptHidden, setPromptHidden]= useState(false);
+  const [stars,         setStars]        = useState(0);
+  const [showHowTo,     setShowHowTo]    = useState(true);
+  const [showGuide,     setShowGuide]    = useState(false);
+  const [showAdBreak,   setShowAdBreak]  = useState(false);
+  const [celebration,   setCelebration]  = useState(null);
+  const [promptHidden,  setPromptHidden] = useState(false);
+  const [guideStats,    setGuideStats]   = useState(null);
 
-  // ── Stats snapshot for GuidePanel ──
-  const [guideStats, setGuideStats] = useState(null);
+  // ── Check ad break conditions ──
+  function maybeShowAd() {
+    const now = Date.now();
+    const timeSinceAd = lastAdTime.current ? now - lastAdTime.current : Infinity;
+    const keysReady   = keysSinceAd.current >= AD_KEY_TRIGGER;
+    const timeReady   = timeSinceAd >= AD_INTERVAL_MS;
 
-  // ── Beat queue ──
+    if (keysReady && timeReady) {
+      lastAdTime.current  = now;
+      keysSinceAd.current = 0;
+      setShowAdBreak(true);
+    }
+  }
+
+  // ── Beat queue callback ──
   const fireKey = useCallback((key) => {
     if (key === ' ') {
       playFireworks();
@@ -70,14 +91,26 @@ export default function ChildPlay() {
     }
 
     statsRef.current.keyCount++;
+    keysSinceAd.current++;
     const kc = statsRef.current.keyCount;
+
+    // Stars every 5 keys
     if (kc % 5 === 0) {
       statsRef.current.stars++;
       setStars(s => s + 1);
     }
+
+    // Milestone guide popup
+    if (MILESTONES.has(kc)) {
+      setGuideStats({ ...statsRef.current });
+      setShowGuide(true);
+    }
+
+    // Ad break check
+    maybeShowAd();
   }, [playNote, playFireworks, statsRef]);
 
-  const { enqueue, popLast, clearAll, activeDot, queueLen } = useBeatQueue(fireKey);
+  const { enqueue, popLast, activeDot, queueLen } = useBeatQueue(fireKey);
 
   function triggerCelebration(word) {
     playCelebration();
@@ -92,7 +125,7 @@ export default function ChildPlay() {
   function resetInactivity() {
     clearTimeout(inactivityRef.current);
     inactivityRef.current = setTimeout(() => {
-      if (statsRef.current.keyCount >= 3) {
+      if (statsRef.current.keyCount >= 3 && !showAdBreak) {
         setGuideStats({ ...statsRef.current });
         setShowGuide(true);
       }
@@ -103,6 +136,7 @@ export default function ChildPlay() {
   useEffect(() => {
     function onKey(e) {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (showAdBreak) return; // block input during ad
       if (showGuide) { setShowGuide(false); resetInactivity(); return; }
 
       if (e.key === 'Escape') {
@@ -113,15 +147,17 @@ export default function ChildPlay() {
       }
       if (e.key === 'Backspace') {
         e.preventDefault();
-        if (!popLast()) typedRef.current = typedRef.current.slice(0, -1);
+        popLast();
+        typedRef.current = typedRef.current.slice(0, -1);
         return;
       }
       if (!ALLOWED.test(e.key)) return;
       e.preventDefault();
 
       if (!hasStarted.current) {
-        hasStarted.current = true;
+        hasStarted.current      = true;
         statsRef.current.startTime = Date.now();
+        lastAdTime.current      = Date.now(); // start ad clock on first keypress
         setShowHowTo(false);
       }
 
@@ -134,10 +170,11 @@ export default function ChildPlay() {
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [showGuide, enqueue, popLast, statsRef]);
+  }, [showGuide, showAdBreak, enqueue, popLast, statsRef]);
 
   return (
-    <div className="fixed inset-0 overflow-hidden" style={{ background: 'radial-gradient(ellipse at 50% 80%, #1a1a5e 0%, #0d0d2b 60%)' }}>
+    <div className="fixed inset-0 overflow-hidden"
+         style={{ background: 'radial-gradient(ellipse at 50% 80%, #1a1a5e 0%, #0d0d2b 60%)' }}>
       <StarField />
 
       {/* Ground glow */}
@@ -145,9 +182,9 @@ export default function ChildPlay() {
            style={{ background: 'linear-gradient(to top, rgba(100,60,200,0.22), transparent)' }} />
 
       {/* Star counter */}
-      <div className="fixed top-4 right-5 z-20 flex items-center gap-2 text-2xl font-black">
+      <div className="fixed top-4 right-5 z-20 flex items-center gap-2 font-black text-2xl">
         <span>⭐</span>
-        <span className="text-yellow-300 text-lg" style={{ textShadow: '0 0 10px #FDE047' }}>
+        <span className="text-yellow-300 text-lg" style={{ textShadow:'0 0 10px #FDE047' }}>
           {stars}
         </span>
       </div>
@@ -179,13 +216,14 @@ export default function ChildPlay() {
           <div className="text-[5rem] mb-4">⌨️</div>
           <p className="text-white/70 text-xl font-bold tracking-widest">Press any key to make music!</p>
           <p className="text-white/30 text-sm mt-3 tracking-wide">Letters · Numbers · Space = fireworks</p>
+          <p className="text-white/20 text-xs mt-2 tracking-wide">Spell CAT · DOG · STAR for a surprise!</p>
         </div>
       )}
 
-      {/* Celebration overlay */}
+      {/* Celebration */}
       {celebration && (
         <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
-          <div className={`text-center celebration-show`}>
+          <div className="celebration-show text-center">
             <p className="text-white font-black tracking-widest"
                style={{ fontSize:'clamp(2.5rem,10vw,6rem)', textShadow:'0 0 40px rgba(255,220,0,0.8)' }}>
               {celebration}!
@@ -201,6 +239,11 @@ export default function ChildPlay() {
           onKeepPlaying={() => { setShowGuide(false); resetInactivity(); }}
           onParentMode={() => { setShowGuide(false); setMode('gate'); }}
         />
+      )}
+
+      {/* Ad break */}
+      {showAdBreak && (
+        <AdBreak onDone={() => { setShowAdBreak(false); resetInactivity(); }} />
       )}
     </div>
   );
