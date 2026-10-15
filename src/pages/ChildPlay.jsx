@@ -11,6 +11,20 @@ const AD_INTERVAL_MS = 3 * 60 * 1000;
 const AD_KEY_TRIGGER = 40;
 const ALLOWED        = /^[a-zA-Z0-9 ]$/;
 
+// ── Fullscreen helpers ────────────────────────────────────────────────────────
+function enterFullscreen() {
+  const el = document.documentElement;
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+  if (fn) fn.call(el).catch(() => {});
+}
+function exitFullscreen() {
+  const fn = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+  if (fn && document.fullscreenElement) fn.call(document).catch(() => {});
+}
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
 function spawnFireworks() {
   for (let i = 0; i < 22; i++) {
     const sb = document.createElement('div');
@@ -44,7 +58,31 @@ export default function ChildPlay() {
   const [showAdBreak,  setShowAdBreak] = useState(false);
   const [celebration,  setCelebration] = useState(null);
   const [promptHidden, setPromptHidden]= useState(false);
-  const [exitVisible,  setExitVisible] = useState(false); // shown on 3s corner hover
+  const [exitVisible,  setExitVisible] = useState(false);
+  const [fsLost,       setFsLost]      = useState(false); // user exited fullscreen
+
+  // ── Track fullscreen changes ───────────────────────────────────────────────
+  useEffect(() => {
+    function onChange() {
+      // If child was playing and fullscreen was exited externally, show re-enter prompt
+      if (!isFullscreen() && hasStarted.current && !showAdBreak) {
+        setFsLost(true);
+      } else {
+        setFsLost(false);
+      }
+    }
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, [showAdBreak]);
+
+  // Exit fullscreen when leaving child mode
+  useEffect(() => {
+    return () => exitFullscreen();
+  }, []);
 
   // ── Hover sound (soft ping, very quiet) ───────────────────────────────────
   function playHoverSound() {
@@ -133,6 +171,8 @@ export default function ChildPlay() {
         statsRef.current.startTime = Date.now();
         lastAdTime.current = Date.now();
         setShowHowTo(false);
+        setFsLost(false);
+        enterFullscreen(); // first keypress = user gesture, safe to request fullscreen
       }
       enqueue(e.key);
       setPromptHidden(true);
@@ -192,13 +232,63 @@ export default function ChildPlay() {
         </p>
       )}
 
-      {/* How-to */}
+      {/* How-to — includes fullscreen launch button for touch/mouse */}
       {showHowTo && (
-        <div className="fixed inset-0 flex flex-col items-center justify-center z-10 pointer-events-none gap-3">
-          <div className="text-[5rem]">⌨️</div>
-          <p className="text-white/70 text-xl font-bold tracking-widest">Press any key to make music!</p>
-          <p className="text-white/30 text-sm tracking-wide">Letters · Numbers · Space = fireworks</p>
-          <p className="text-white/20 text-xs tracking-wide mt-1">Spell CAT · DOG · STAR · LOVE for a surprise!</p>
+        <div className="fixed inset-0 flex flex-col items-center justify-center z-10 gap-4">
+          <div className="text-[5rem] pointer-events-none">⌨️</div>
+          <p className="text-white/70 text-xl font-bold tracking-widest pointer-events-none">
+            Press any key to make music!
+          </p>
+          <p className="text-white/30 text-sm tracking-wide pointer-events-none">
+            Letters · Numbers · Space = fireworks
+          </p>
+          {/* Large tap target — enters fullscreen and starts session */}
+          <button
+            className="mt-4 bg-[#FDE047] text-black font-black text-lg rounded-full px-10 py-4
+                       tracking-widest shadow-lg shadow-yellow-400/30
+                       hover:scale-105 active:scale-95 transition-transform"
+            onClick={() => {
+              enterFullscreen();
+              hasStarted.current = true;
+              statsRef.current.startTime = Date.now();
+              lastAdTime.current = Date.now();
+              setShowHowTo(false);
+              setFsLost(false);
+            }}
+          >
+            Tap to Play Fullscreen
+          </button>
+          <p className="text-white/20 text-xs tracking-wide">
+            Or just press any key on your keyboard
+          </p>
+        </div>
+      )}
+
+      {/* Re-enter fullscreen prompt (shown if user presses Esc or exits fullscreen) */}
+      {fsLost && !showHowTo && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#13132a] border border-white/10 rounded-3xl p-8 flex flex-col items-center gap-5 shadow-2xl">
+            <div className="text-5xl">🔒</div>
+            <p className="text-white font-black text-lg tracking-widest text-center">
+              Screen is no longer fullscreen
+            </p>
+            <p className="text-white/40 text-sm text-center tracking-wide max-w-xs">
+              Tap below to go back to fullscreen so your child can play safely.
+            </p>
+            <button
+              onClick={() => { enterFullscreen(); setFsLost(false); }}
+              className="bg-[#FDE047] text-black font-black text-base rounded-full px-10 py-4
+                         tracking-widest hover:scale-105 active:scale-95 transition-transform"
+            >
+              Return to Fullscreen
+            </button>
+            <button
+              onClick={() => { exitFullscreen(); setMode('gate'); }}
+              className="text-white/30 text-xs hover:text-white/60 transition-colors"
+            >
+              Exit to Parent Mode
+            </button>
+          </div>
         </div>
       )}
 
@@ -222,7 +312,7 @@ export default function ChildPlay() {
       >
         {exitVisible && (
           <button
-            onClick={() => setMode('gate')}
+            onClick={() => { exitFullscreen(); setMode('gate'); }}
             onMouseEnter={playHoverSound}
             className="absolute bottom-2 left-2 bg-black/60 border border-white/20 text-white/60
                        text-[10px] tracking-widest font-bold rounded-xl px-3 py-2
